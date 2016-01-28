@@ -9,9 +9,11 @@ namespace Drupal\rules\Engine;
 
 use Drupal\Core\TypedData\Exception\MissingDataException;
 use Drupal\Core\TypedData\TypedDataInterface;
+use Drupal\Core\TypedData\TypedDataTrait;
 use Drupal\rules\Context\ContextDefinitionInterface;
+use Drupal\rules\Context\GlobalContextRepositoryTrait;
 use Drupal\rules\Exception\RulesEvaluationException;
-use Drupal\rules\TypedData\TypedDataManagerTrait;
+use Drupal\rules\TypedData\DataFetcherTrait;
 
 /**
  * The rules execution state.
@@ -21,7 +23,9 @@ use Drupal\rules\TypedData\TypedDataManagerTrait;
  */
 class ExecutionState implements ExecutionStateInterface {
 
-  use TypedDataManagerTrait;
+  use DataFetcherTrait;
+  use GlobalContextRepositoryTrait;
+  use TypedDataTrait;
 
   /**
    * Globally keeps the ids of rules blocked due to recursion prevention.
@@ -59,7 +63,6 @@ class ExecutionState implements ExecutionStateInterface {
    */
   public static function create($variables = []) {
     return new static($variables);
-    // @todo Initialize the global "site" variable.
   }
 
   /**
@@ -96,7 +99,7 @@ class ExecutionState implements ExecutionStateInterface {
    * {@inheritdoc}
    */
   public function getVariable($name) {
-    if (!array_key_exists($name, $this->variables)) {
+    if (!$this->hasVariable($name)) {
       throw new RulesEvaluationException("Unable to get variable $name, it is not defined.");
     }
     return $this->variables[$name];
@@ -113,26 +116,47 @@ class ExecutionState implements ExecutionStateInterface {
    * {@inheritdoc}
    */
   public function hasVariable($name) {
-    return array_key_exists($name, $this->variables);
+    if (!array_key_exists($name, $this->variables)) {
+      // If there is no such variable, lazy-add global context variables. That
+      // way can safe time fetching global context if its not needed.
+      if (!($name[0] === '@' && strpos($name, ':') !== FALSE)) {
+        return FALSE;
+      }
+      $contexts = $this->getGlobalContextRepository()->getRuntimeContexts([$name]);
+      if (!array_key_exists($name, $contexts)) {
+        return FALSE;
+      }
+      $this->addVariableData($name, $contexts[$name]->getContextData());
+    }
+    return TRUE;
   }
 
   /**
    * {@inheritdoc}
    */
-  public function fetchByPropertyPath($property_path, $langcode = NULL) {
+  public function fetchDataByPropertyPath($property_path, $langcode = NULL) {
     try {
+      // Support global context names as variable name by ignoring points in
+      // the service name; e.g. @user.current_user_context:current_user.name.
+      if ($property_path[0] == '@') {
+        list($service, $property_path) = explode(':', $property_path, 2);
+      }
       $parts = explode('.', $property_path);
       $var_name = array_shift($parts);
+      if (isset($service)) {
+        $var_name = $service . ':' . $var_name;
+      }
       return $this
-        ->getTypedDataManager()
         ->getDataFetcher()
-        ->fetchBySubPaths($this->getVariable($var_name), $parts, $langcode);
+        ->fetchDataBySubPaths($this->getVariable($var_name), $parts, $langcode);
     }
     catch (\InvalidArgumentException $e) {
-      throw new RulesEvaluationException($e->getMessage());
+      // Pass on the original exception in the exception trace.
+      throw new RulesEvaluationException($e->getMessage(), 0, $e);
     }
     catch (MissingDataException $e) {
-      throw new RulesEvaluationException($e->getMessage());
+      // Pass on the original exception in the exception trace.
+      throw new RulesEvaluationException($e->getMessage(), 0, $e);
     }
   }
 
@@ -150,7 +174,7 @@ class ExecutionState implements ExecutionStateInterface {
   public function autoSave() {
     // Make changes permanent.
     foreach ($this->saveLater as $selector => $flag) {
-      $typed_data = $this->fetchByPropertyPath($selector);
+      $typed_data = $this->fetchDataByPropertyPath($selector);
       // The returned data can be NULL, only save it if we actually have
       // something here.
       if ($typed_data) {
