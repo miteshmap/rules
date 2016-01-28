@@ -104,13 +104,11 @@ class GenericEventSubscriber implements EventSubscriberInterface {
       else {
         $value = $event->$context_name;
       }
-      if ($event instanceof GenericEvent) {
-        $state->addVariable(
-          $context_name,
-          $context_definition,
-          $value
-        );
-      }
+      $state->addVariable(
+        $context_name,
+        $context_definition,
+        $value
+      );
     }
 
     // Loop over all rules and execute them.
